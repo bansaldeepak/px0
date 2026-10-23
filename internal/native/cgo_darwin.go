@@ -3,7 +3,7 @@
 package native
 
 /*
-#cgo LDFLAGS: -framework UniformTypeIdentifiers -framework AppKit
+#cgo LDFLAGS: -framework UniformTypeIdentifiers
 #include "dock_icon_darwin.h"
 */
 import "C"
