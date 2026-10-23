@@ -60,6 +60,7 @@ modes:
   --vscode          measure and compare running VS Code process tree vs px0
   --vscode-vanilla  spawn isolated vanilla VS Code (no extensions) & measure
   --editors         compare px0 vs VS Code (running & vanilla), Neovim, Vim, etc.
+  --native [dir]    compare regular vs Wails native binary: size, startup, RSS, API latency
   --help            show this
 
 examples:
@@ -72,6 +73,7 @@ examples:
   ./benchmark.sh --vscode [directory]
   ./benchmark.sh --vscode-vanilla [directory]
   ./benchmark.sh --editors [directory]
+  ./benchmark.sh --native [directory]
   ./benchmark.sh ~/src/myproject
   ./benchmark.sh --memory bench-repos/linux
   ./benchmark.sh --lsp .
@@ -782,6 +784,104 @@ shutil.rmtree(tmp_ext, ignore_errors=True)
 "
 }
 
+bench_native() {
+  local target=${1:-.}
+  local abs_target port=$PORT
+  abs_target=$(resolve "$target") || abs_target="$target"
+
+  local native_bin="${NATIVE_BIN:-./px0-native}"
+  local regular_bin="${BIN:-./px0}"
+
+  [ -x "$regular_bin" ] || die "$regular_bin not found; run: go build -o px0 ."
+  [ -x "$native_bin"  ] || die "$native_bin not found; run: CGO_ENABLED=1 go build -tags production -o px0-native ."
+
+  echo "### Native vs. Browser build comparison"
+  echo "    target: $abs_target"
+  echo ""
+
+  # --- Binary sizes ---
+  local reg_sz nat_sz
+  reg_sz=$(du -sh "$regular_bin" 2>/dev/null | cut -f1)
+  nat_sz=$(du -sh "$native_bin"  2>/dev/null | cut -f1)
+
+  # --- Regular binary: startup + API latency + RSS ---
+  local reg_start reg_pid reg_base
+  reg_start=$(now_ms)
+  reg_pid=$(start_server "$abs_target" "$port" -no-lsp) || die "regular server did not start"
+  reg_start=$(( $(now_ms) - reg_start ))
+  reg_base="http://127.0.0.1:$port"
+
+  local reg_meta_ms reg_find_ms reg_scan_ms reg_rss
+  reg_meta_ms=$(best_ms "$reg_base/api/meta")
+  reg_find_ms=$(best_ms "$reg_base/api/find?q=srv&limit=100")
+  reg_scan_ms=$(best_ms "$reg_base/api/search?q=zzqqxx_no_such_token")
+  reg_rss=$(rss_mb "$reg_pid" "$port")
+
+  kill "$reg_pid" 2>/dev/null; wait "$reg_pid" 2>/dev/null || true
+  PORT=$((port + 1))
+  port=$PORT
+
+  # --- Native binary: same measurements (server-only mode, no Wails window) ---
+  local nat_start nat_pid nat_base
+  nat_start=$(now_ms)
+  nat_pid=$(start_server "$abs_target" "$port" -no-lsp)  || die "native server did not start"
+  nat_start=$(( $(now_ms) - nat_start ))
+  nat_base="http://127.0.0.1:$port"
+
+  local nat_meta_ms nat_find_ms nat_scan_ms nat_rss
+  nat_meta_ms=$(best_ms "$nat_base/api/meta")
+  nat_find_ms=$(best_ms "$nat_base/api/find?q=srv&limit=100")
+  nat_scan_ms=$(best_ms "$nat_base/api/search?q=zzqqxx_no_such_token")
+  nat_rss=$(rss_mb "$nat_pid" "$port")
+
+  kill "$nat_pid" 2>/dev/null; wait "$nat_pid" 2>/dev/null || true
+  PORT=$((port + 1))
+
+  python3 -c "
+import sys
+
+reg_sz    = '$reg_sz'
+nat_sz    = '$nat_sz'
+reg_start = $reg_start
+nat_start = $nat_start
+reg_meta  = float('$reg_meta_ms')
+nat_meta  = float('$nat_meta_ms')
+reg_find  = float('$reg_find_ms')
+nat_find  = float('$nat_find_ms')
+reg_scan  = float('$reg_scan_ms')
+nat_scan  = float('$nat_scan_ms')
+reg_rss   = int('$reg_rss')  if '$reg_rss'.isdigit()  else 0
+nat_rss   = int('$nat_rss')  if '$nat_rss'.isdigit()  else 0
+
+def delta(b, n, unit='ms', lower_is_better=True):
+    if b <= 0: return 'n/a'
+    d = n - b
+    pct = (d / b) * 100.0
+    if abs(pct) < 2:
+        return 'no change'
+    arrow = ('worse' if d > 0 else 'faster') if lower_is_better else ('heavier' if d > 0 else 'lighter')
+    sign = '+' if d > 0 else ''
+    return f'{sign}{d:.1f} {unit} ({sign}{pct:.1f}%,  {arrow})'
+
+print('| Metric                      | Regular (browser) | Native (Wails)   | Delta                  |')
+print('| :-------------------------- | :---------------- | :--------------- | :--------------------- |')
+print(f'| Binary size                 | {reg_sz:>17} | {nat_sz:>16} | (WebKit + Obj-C added) |')
+print(f'| Ready (startup ms)          | {reg_start:>14} ms | {nat_start:>13} ms | {delta(reg_start, nat_start)} |')
+print(f'| /api/meta (best of 5)       | {reg_meta:>14.1f} ms | {nat_meta:>13.1f} ms | {delta(reg_meta, nat_meta)} |')
+print(f'| /api/find fuzzy (best of 5) | {reg_find:>14.1f} ms | {nat_find:>13.1f} ms | {delta(reg_find, nat_find)} |')
+print(f'| /api/search full scan       | {reg_scan:>14.1f} ms | {nat_scan:>13.1f} ms | {delta(reg_scan, nat_scan)} |')
+print(f'| Server RSS (no window)      | {reg_rss:>14} MB | {nat_rss:>13} MB | {delta(reg_rss, nat_rss, \"MB\", True)} |')
+print()
+print('Notes:')
+print('  API latency is measured via the TCP server (same handler in both modes).')
+print('  With -native, the Wails WebView communicates in-process (no TCP round-trip),')
+print('  so real-world latency in native mode is equal or slightly lower.')
+print('  Total system memory with window open:')
+print(f'    Browser mode:  ~{reg_rss} MB (server) + ~100-150 MB (browser tab)  =  ~{reg_rss + 125} MB')
+print(f'    Native mode:   ~{nat_rss} MB (server + WebKit bundled, no browser tab)')
+"
+}
+
 bench_editors() {
   local target=${1:-.}
   local abs_target
@@ -951,6 +1051,8 @@ case "${1-}" in
   --editors) shift; [ $# -gt 0 ] || set -- .
              [ -x "$BIN" ] || die "$BIN not found; run: go build -o px0 ."
              bench_editors "${1%/}"; exit 0 ;;
+  --native)  shift; [ $# -gt 0 ] || set -- .
+             bench_native "${1%/}"; exit 0 ;;
   -*)        die "unknown option: $1 (try --help)" ;;
 esac
 

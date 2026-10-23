@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "px0",
+  "outputfilename": "px0",
+  "frontend:dir": "",
+  "frontend:install": "echo skip",
+  "frontend:build": "echo skip",
+  "frontend:dev:serverUrl": "auto",
+  "info": {
+    "productName": "px0",
+    "productVersion": "0.1.20",
+    "copyright": "Arcitae",
+    "comments": "A fast, local-first code navigator and review tool.",
+    "fileAssociations": []
+  },
+  "author": {
+    "name": "Arcitae"
+  }
+}

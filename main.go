@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"px0/internal/native"
 	"px0/internal/settings"
 	"px0/internal/telemetry"
 	"px0/internal/ui"
@@ -41,6 +42,7 @@ func main() {
 		port         = flag.Int("port", 7777, "port to listen on (0 picks a free one)")
 		host         = flag.String("host", "127.0.0.1", "address to bind")
 		noOpen       = flag.Bool("no-open", false, "do not launch a browser")
+		nativeWindow = flag.Bool("native", false, "open in a native desktop window (requires CGO_ENABLED=1 go build -tags production)")
 		noLSP        = flag.Bool("no-lsp", false, "do not use language servers, even if installed")
 		noGit        = flag.Bool("no-git", false, "disable git awareness")
 		showVer      = flag.Bool("version", false, "print version and exit")
@@ -250,6 +252,26 @@ func main() {
 		}
 		ui.Status("ok", fmt.Sprintf("bound TCP listener on %s", addr), ui.FmtDuration(listenDur), 0, os.Stdout)
 		ui.Status("ok", "initialized HTTP server and services", ui.FmtDuration(initDur), 0, os.Stdout)
+	}
+
+	// Native window mode: Wails hosts a WebView; the HTTP server runs in the
+	// background so child workbench processes can still connect to it over TCP.
+	if *nativeWindow {
+		if !native.Supported() {
+			fatal(fmt.Errorf("px0 was not built with native window support; rebuild with: CGO_ENABLED=1 go build -tags production ."))
+		}
+		go func() {
+			// Index and background tasks still need to run.
+			ix.Build()
+			if pxSrv.gitWatcher != nil {
+				pxSrv.gitWatcher.Trigger()
+			}
+		}()
+		go srv.Serve(ln) // keep TCP server for workbench children
+		if err := native.Run(pxSrv, "px0 "+version); err != nil {
+			fatal(fmt.Errorf("native window: %w", err))
+		}
+		return
 	}
 
 	// Launch browser immediately without blocking startup.
