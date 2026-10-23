@@ -4,6 +4,7 @@ package native
 
 import (
 	"context"
+	_ "embed"
 	"net/http"
 
 	"github.com/wailsapp/wails/v2"
@@ -12,12 +13,18 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 )
 
+//go:embed assets/appicon.png
+var appIcon []byte
+
 // Supported reports whether this binary was built with native window support.
 func Supported() bool { return true }
 
 type app struct{ ctx context.Context }
 
-func (a *app) startup(ctx context.Context) { a.ctx = ctx }
+func (a *app) startup(ctx context.Context) {
+	a.ctx = ctx
+	setDockIcon(appIcon)
+}
 
 // Run opens a native desktop window using Wails, serving all requests through
 // handler (the existing px0 HTTP server). The function blocks until the window
@@ -39,6 +46,10 @@ func Run(handler http.Handler, title string) error {
 			TitleBar:             mac.TitleBarHiddenInset(),
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
+			About: &mac.AboutInfo{
+				Title: "px0",
+				Icon:  appIcon,
+			},
 		},
 	})
 }
